@@ -74,6 +74,10 @@ public class Capture extends CordovaPlugin {
     private static final String IMAGE_PATH_KEY = "imageAbsolutePath";
     private static final String VIDEO_PATH_KEY = "videoAbsolutePath";
 
+    // Captures are written to the cache folder (getTempDirectoryPath()); an app keeps one by moving
+    // or copying it elsewhere. Files left there longer than this are deleted when the plugin starts.
+    private static final long CACHE_MAX_AGE_MS = 7L * 24 * 60 * 60 * 1000;
+
     private static final int CAPTURE_INTERNAL_ERR = 0;
 //    private static final int CAPTURE_APPLICATION_BUSY = 1;
 //    private static final int CAPTURE_INVALID_ARGUMENT = 2;
@@ -120,6 +124,14 @@ public class Capture extends CordovaPlugin {
             // never be caught
             LOG.e(LOG_TAG, "Failed checking for CAMERA permission in manifest", e);
         }
+
+        // Drop what earlier captures left behind: cancelled, failed or never moved by the app
+        cordova.getThreadPool().execute(new Runnable() {
+            @Override
+            public void run() {
+                deleteOldCaptures();
+            }
+        });
     }
 
     @Override
@@ -378,6 +390,8 @@ public class Capture extends CordovaPlugin {
         }
         // If canceled
         else if (resultCode == Activity.RESULT_CANCELED) {
+            discardCaptureTarget(req.action);
+
             // If we have partial results send them back to the user
             if (req.results.length() > 0) {
                 pendingRequests.resolveWithSuccess(req);
@@ -389,6 +403,8 @@ public class Capture extends CordovaPlugin {
         }
         // If something else
         else {
+            discardCaptureTarget(req.action);
+
             // If we have partial results send them back to the user
             if (req.results.length() > 0) {
                 pendingRequests.resolveWithSuccess(req);
@@ -625,6 +641,35 @@ public class Capture extends CordovaPlugin {
                 return this.imageAbsolutePath;
             default:
                 return this.videoAbsolutePath;
+        }
+    }
+
+    /**
+     * Deletes what a cancelled or failed capture left at its target, usually an empty file.
+     *
+     * @param action CAPTURE_AUDIO, CAPTURE_IMAGE or CAPTURE_VIDEO
+     */
+    private void discardCaptureTarget(int action) {
+        String path = getCaptureTargetPath(action);
+        if (path != null) {
+            new File(path).delete();
+        }
+    }
+
+    /**
+     * Deletes captures older than CACHE_MAX_AGE_MS from the cache folder.
+     */
+    private void deleteOldCaptures() {
+        File[] files = new File(getTempDirectoryPath()).listFiles();
+        if (files == null) {
+            return;
+        }
+
+        long cutoff = System.currentTimeMillis() - CACHE_MAX_AGE_MS;
+        for (File file : files) {
+            if (file.isFile() && file.lastModified() < cutoff && !file.delete()) {
+                LOG.w(LOG_TAG, "Unable to delete old capture " + file.getAbsolutePath());
+            }
         }
     }
 
