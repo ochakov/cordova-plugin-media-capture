@@ -70,6 +70,10 @@ public class Capture extends CordovaPlugin {
     private static final int CAPTURE_VIDEO = 2;     // Constant for capture video
     private static final String LOG_TAG = "Capture";
 
+    private static final String AUDIO_PATH_KEY = "audioAbsolutePath";
+    private static final String IMAGE_PATH_KEY = "imageAbsolutePath";
+    private static final String VIDEO_PATH_KEY = "videoAbsolutePath";
+
     private static final int CAPTURE_INTERNAL_ERR = 0;
 //    private static final int CAPTURE_APPLICATION_BUSY = 1;
 //    private static final int CAPTURE_INVALID_ARGUMENT = 2;
@@ -90,6 +94,10 @@ public class Capture extends CordovaPlugin {
     @Override
     protected void pluginInitialize() {
         super.pluginInitialize();
+
+        // Also set here: a result that arrives after Android recreated the app reaches a new
+        // instance whose execute() never ran
+        this.applicationId = cordova.getContext().getPackageName();
 
         // CB-10670: The CAMERA permission does not need to be requested unless it is declared
         // in AndroidManifest.xml. This plugin does not declare it, but others may and so we must
@@ -337,9 +345,18 @@ public class Capture extends CordovaPlugin {
      */
     public void onActivityResult(int requestCode, int resultCode, final Intent intent) {
         final Request req = pendingRequests.get(requestCode);
+        if (req == null) {
+            LOG.w(LOG_TAG, "No pending capture request for request code " + requestCode);
+            return;
+        }
 
         // Result received okay
         if (resultCode == Activity.RESULT_OK) {
+            if (getCaptureTargetPath(req.action) == null) {
+                pendingRequests.resolveWithFailure(req, createErrorObject(CAPTURE_INTERNAL_ERR, "Error: the capture target was lost"));
+                return;
+            }
+
             Runnable processActivityResult = new Runnable() {
                 @Override
                 public void run() {
@@ -578,11 +595,37 @@ public class Capture extends CordovaPlugin {
     }
 
     public Bundle onSaveInstanceState() {
-        return pendingRequests.toBundle();
+        Bundle state = pendingRequests.toBundle();
+        // The capture targets live only in fields. If Android destroys the app while the camera
+        // app is in front, the result is delivered to a new instance that needs them.
+        state.putString(AUDIO_PATH_KEY, this.audioAbsolutePath);
+        state.putString(IMAGE_PATH_KEY, this.imageAbsolutePath);
+        state.putString(VIDEO_PATH_KEY, this.videoAbsolutePath);
+        return state;
     }
 
     public void onRestoreStateForActivityResult(Bundle state, CallbackContext callbackContext) {
         pendingRequests.setLastSavedState(state, callbackContext);
+        this.audioAbsolutePath = state.getString(AUDIO_PATH_KEY);
+        this.imageAbsolutePath = state.getString(IMAGE_PATH_KEY);
+        this.videoAbsolutePath = state.getString(VIDEO_PATH_KEY);
+    }
+
+    /**
+     * Gets the file the current capture of the given type is written to.
+     *
+     * @param action CAPTURE_AUDIO, CAPTURE_IMAGE or CAPTURE_VIDEO
+     * @return the absolute path, or null if no capture of that type was started
+     */
+    private String getCaptureTargetPath(int action) {
+        switch (action) {
+            case CAPTURE_AUDIO:
+                return this.audioAbsolutePath;
+            case CAPTURE_IMAGE:
+                return this.imageAbsolutePath;
+            default:
+                return this.videoAbsolutePath;
+        }
     }
 
     /**
