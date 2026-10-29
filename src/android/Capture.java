@@ -19,7 +19,6 @@
 package org.apache.cordova.mediacapture;
 
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -352,7 +351,7 @@ public class Capture extends CordovaPlugin {
                             onImageActivityResult(req);
                             break;
                         case CAPTURE_VIDEO:
-                            onVideoActivityResult(req);
+                            onVideoActivityResult(req, intent);
                             break;
                     }
                 }
@@ -385,39 +384,13 @@ public class Capture extends CordovaPlugin {
     }
 
     public void onAudioActivityResult(Request req, Intent intent) {
-        Uri uri = intent.getData();
-
-        InputStream input = null;
-        OutputStream output = null;
-        try {
-            if (uri == null) {
-                throw new IOException("Unable to open input audio");
-            }
-
-            input = this.cordova.getActivity().getContentResolver().openInputStream(uri);
-
-            if (input == null) {
-                throw new IOException("Unable to open input audio");
-            }
-
-            output = new FileOutputStream(this.audioAbsolutePath);
-
-            byte[] buffer = new byte[getPageSize()];
-            int bytesRead;
-            while ((bytesRead = input.read(buffer)) != -1) {
-                output.write(buffer, 0, bytesRead);
-            }
-        } catch (FileNotFoundException e) {
-            pendingRequests.resolveWithFailure(req, createErrorObject(CAPTURE_INTERNAL_ERR, "Error: Unable to read input audio: File not found"));
-        } catch (IOException e) {
+        // The recorder keeps the clip in its own location and returns its URI
+        Uri uri = intent == null ? null : intent.getData();
+        File audio = new File(this.audioAbsolutePath);
+        if (uri == null || !copyUriToFile(uri, audio)) {
+            audio.delete();
             pendingRequests.resolveWithFailure(req, createErrorObject(CAPTURE_INTERNAL_ERR, "Error: Unable to read input audio"));
-        } finally {
-            try {
-                if (output != null) output.close();
-                if (input != null) input.close();
-            } catch (IOException ex) {
-                pendingRequests.resolveWithFailure(req, createErrorObject(CAPTURE_INTERNAL_ERR, "Error: Unable to copy input audio"));
-            }
+            return;
         }
 
         // create a file object from the audio absolute path
@@ -439,6 +412,12 @@ public class Capture extends CordovaPlugin {
     }
 
     public void onImageActivityResult(Request req) {
+        // A camera app that ignores EXTRA_OUTPUT returns only a thumbnail, nothing to fall back to
+        if (new File(this.imageAbsolutePath).length() == 0) {
+            pendingRequests.resolveWithFailure(req, createErrorObject(CAPTURE_NO_MEDIA_FILES, "Error: the camera app did not save the picture"));
+            return;
+        }
+
         // create a file object from the image absolute path
         JSONObject mediaFile = createMediaFileWithAbsolutePath(this.imageAbsolutePath);
         if (mediaFile == null) {
@@ -457,7 +436,23 @@ public class Capture extends CordovaPlugin {
         }
     }
 
-    public void onVideoActivityResult(Request req) {
+    public void onVideoActivityResult(Request req, Intent intent) {
+        File video = new File(this.videoAbsolutePath);
+        if (video.length() == 0) {
+            // Some camera apps ignore EXTRA_OUTPUT for videos: they keep the clip in their own
+            // location and return its URI, usually with read access granted. Copy it from there.
+            Uri data = intent == null ? null : intent.getData();
+            boolean copied = data != null
+                    && !(this.applicationId + ".cordova.plugin.mediacapture.provider").equals(data.getAuthority())
+                    && copyUriToFile(data, video);
+            if (!copied) {
+                video.delete();
+                pendingRequests.resolveWithFailure(req, createErrorObject(CAPTURE_NO_MEDIA_FILES, "Error: the camera app did not save the video"));
+                return;
+            }
+            LOG.d(LOG_TAG, "Camera app ignored EXTRA_OUTPUT, copied the video from " + data);
+        }
+
         // create a file object from the video absolute path
         JSONObject mediaFile = createMediaFileWithAbsolutePath(this.videoAbsolutePath);
         if (mediaFile == null) {
@@ -588,6 +583,32 @@ public class Capture extends CordovaPlugin {
 
     public void onRestoreStateForActivityResult(Bundle state, CallbackContext callbackContext) {
         pendingRequests.setLastSavedState(state, callbackContext);
+    }
+
+    /**
+     * Copies the content a URI points to into a file.
+     *
+     * @param uri   the content to copy, usually another app's content URI
+     * @param file  the file to write
+     * @return true if the file was written and is not empty
+     */
+    private boolean copyUriToFile(Uri uri, File file) {
+        try (InputStream input = this.cordova.getActivity().getContentResolver().openInputStream(uri);
+             OutputStream output = new FileOutputStream(file)) {
+            if (input == null) {
+                return false;
+            }
+
+            byte[] buffer = new byte[getPageSize()];
+            int bytesRead;
+            while ((bytesRead = input.read(buffer)) != -1) {
+                output.write(buffer, 0, bytesRead);
+            }
+        } catch (IOException | SecurityException e) {
+            LOG.e(LOG_TAG, "Unable to copy " + uri + " to " + file.getAbsolutePath(), e);
+            return false;
+        }
+        return file.length() > 0;
     }
 
     /**
